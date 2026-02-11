@@ -1,6 +1,6 @@
-pub mod battery;
+pub mod fs;
 pub mod clock;
 pub mod dbus;
 pub mod hyprland;
-pub mod uevent;
 pub mod polling;
+pub mod uevent;

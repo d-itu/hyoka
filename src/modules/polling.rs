@@ -8,14 +8,14 @@ use derive_more::From;
 use futures::{StreamExt as _, channel::mpsc::Receiver};
 
 use crate::modules::{
-    battery::{self, Battery},
     clock::Clock,
+    fs::{Battery, BatteryInfo},
 };
 
 #[derive(From, Debug)]
 pub enum Event {
     Clock(Clock),
-    Battery(battery::Info),
+    Battery(BatteryInfo),
 }
 
 pub enum Signal {

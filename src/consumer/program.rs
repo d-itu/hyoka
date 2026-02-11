@@ -37,9 +37,9 @@ use crate::{
     mapping::Mapping,
     modules::{
         self,
-        battery::{self, Battery},
         clock::Clock,
         dbus::{Tray, TrayEvent},
+        fs::{Backlight, Battery, ChargingStatus},
         hyprland, polling,
     },
     wayland,
@@ -58,6 +58,7 @@ pub enum Message {
     TrayAction(Tray),
     CloseTooltip,
     BatteryStop,
+    Backlight,
 }
 
 type Callbacks = FxHashMap<wayland::Callback, Box<dyn FnOnce(&mut Runner)>>;
@@ -106,25 +107,32 @@ impl<T: PartialEq> Attr<T> {
 struct BatteryStatus {
     device: Rc<Battery>,
     charging: Attr<Option<bool>>,
-    status: Attr<battery::Status>,
+    status: Attr<ChargingStatus>,
     capacity: Attr<u8>,
+    icon: Option<Handle>,
 }
 
 impl BatteryStatus {
-    fn new() -> Option<Self> {
+    fn new(icon_cache: &mut IconCache) -> Option<Self> {
         let device = Battery::new()?;
-        Some(Self {
+        let mut res = Self {
             charging: None.into(),
             status: device.status().into(),
             capacity: device.capacity().into(),
             device: Rc::new(device),
-        })
+            icon: None,
+        };
+        res.load_icon(icon_cache);
+        Some(res)
+    }
+    fn load_icon(&mut self, icon_cache: &mut IconCache) {
+        self.icon = icon_cache.load_icon(&self.icon().into(), true);
     }
     fn charged(&self) -> bool {
-        self.status.0 == battery::Status::Full || self.capacity.0 >= 99
+        self.status.0 == ChargingStatus::Full || self.capacity.0 >= 99
     }
     fn charging(&self) -> bool {
-        self.charging.0 == Some(true) || self.status.0 == battery::Status::Charging
+        self.charging.0 == Some(true) || self.status.0 == ChargingStatus::Charging
     }
     fn icon(&self) -> String {
         if self.charged() {
@@ -134,6 +142,47 @@ impl BatteryStatus {
             let state = if self.charging() { "-charging" } else { "" };
             format!("battery-level-{level}{state}-symbolic")
         }
+    }
+}
+
+struct BacklightStatus {
+    device: Backlight,
+    percentage: u32,
+    icon: Option<Handle>,
+}
+
+impl BacklightStatus {
+    fn new(icon_cache: &mut IconCache) -> Option<Self> {
+        Backlight::new()
+            .map(|device| Self {
+                percentage: device.percentage(),
+                icon: None,
+                device,
+            })
+            .map(|mut x| {
+                x.load_icon(icon_cache);
+                x
+            })
+    }
+    fn icon(&self) -> &'static str {
+        match self.percentage {
+            ..33 => "display-brightness-low-symbolic",
+            33..66 => "display-brightness-medium-symbolic",
+            66.. => "display-brightness-high-symbolic",
+        }
+    }
+    fn load_icon(&mut self, icon_cache: &mut IconCache) {
+        self.icon = icon_cache.load_icon(&self.icon().to_string().into(), true)
+    }
+    fn update(&mut self, icon_cache: &mut IconCache) {
+        self.percentage = self.device.percentage();
+        self.load_icon(icon_cache)
+    }
+    fn tooltip(&self) -> TooltipText {
+        let mut buf = TinyString::new();
+        use std::fmt::Write;
+        write!(&mut buf, "{}", self.percentage).unwrap();
+        TooltipText::Simple(buf)
     }
 }
 
@@ -194,14 +243,49 @@ pub struct Runner {
 
     tray_items: AHashMap<Tray, TrayItem>,
 
-    battery_icon: Option<Handle>,
     battery_status: Option<BatteryStatus>,
+    backlight: Option<BacklightStatus>,
 
     date: ArrayVec<u8, 12>,
     time: [u8; 8],
     weekday: &'static str,
 
-    icon_cache: LruCache<TinyString, Option<Handle>, ahash::RandomState>,
+    icon_cache: IconCache,
+}
+
+struct IconCache(LruCache<TinyString, Option<Handle>, ahash::RandomState>);
+
+impl IconCache {
+    fn new() -> Self {
+        Self(LruCache::with_hasher(
+            NonZero::new(16).unwrap(),
+            ahash::RandomState::with_seeds(114, 514, 1919, 810),
+        ))
+    }
+    #[must_use]
+    fn load_icon(&mut self, key: &TinyString, symbolic: bool) -> Option<Handle> {
+        self.0
+            .get_or_insert_ref(key, || {
+                cosmic_freedesktop_icons::lookup(key)
+                    .with_size(64)
+                    // .with_theme("Adwaita")
+                    .with_theme("Tela-dracula-dark")
+                    // .with_theme("Papirus")
+                    .find()
+                    .and_then(|path| match path.extension()?.as_encoded_bytes() {
+                        b"svg" => {
+                            if symbolic {
+                                load_symbolic(path, &theme()).map(Handle::Svg)
+                            } else {
+                                load_svg(path).map(Handle::Svg)
+                            }
+                        }
+                        b"png" => load_png(path).map(Handle::Pixmap),
+                        _ => None,
+                    })
+            })
+            .clone()
+    }
 }
 
 impl Runner {
@@ -274,7 +358,8 @@ impl Runner {
         };
 
         let now = Clock::now();
-        let mut res = Self {
+        let mut icon_cache = IconCache::new();
+        Self {
             wayland,
             display,
             hyprctl,
@@ -296,15 +381,13 @@ impl Runner {
                 icon: None,
             },
             tray_items: AHashMap::with_hasher(ahash::RandomState::with_seeds(114, 514, 1919, 810)),
-            battery_icon: None,
-            battery_status: BatteryStatus::new(),
+            battery_status: BatteryStatus::new(&mut icon_cache),
+            backlight: BacklightStatus::new(&mut icon_cache),
             date: now.date(),
             time: now.time(),
             weekday: now.weekday(),
-            icon_cache: LruCache::with_hasher(NonZero::new(16).unwrap(), ahash::RandomState::new()),
-        };
-        res.reload_battery_icon();
-        res
+            icon_cache,
+        }
     }
     pub fn view(&self, tag: Tag) -> Element<'_> {
         match tag {
@@ -373,6 +456,9 @@ impl Runner {
                     .await
                     .unwrap();
             }
+            Message::Backlight => {
+                self.set_tooltip(self.backlight.as_ref()?.tooltip())?;
+            }
             Message::TrayTooltip(service) => {
                 let content =
                     TinyString::from_string(self.dbus.as_mut()?.tray_tooltip(service).await?);
@@ -436,7 +522,7 @@ impl Runner {
                         icon: if class.is_empty() {
                             None
                         } else {
-                            self.load_icon(&class, false)
+                            self.icon_cache.load_icon(&class, false)
                         },
                         class: truncate(class.clone(), 15, "…"),
                         title: truncate(title.clone(), 50, "…"),
@@ -448,22 +534,22 @@ impl Runner {
                     match e {
                         BatteryEvent::PowerOnline => {
                             if bat.charging.update(Some(true)) {
-                                self.reload_battery_icon();
+                                bat.load_icon(&mut self.icon_cache);
                             }
                         }
                         BatteryEvent::PowerOffline => {
                             if bat.charging.update(Some(false)) {
-                                self.reload_battery_icon();
+                                bat.load_icon(&mut self.icon_cache);
                             }
                         }
                         BatteryEvent::Capacity(x) => {
                             if bat.capacity.update(x) {
-                                self.reload_battery_icon();
+                                bat.load_icon(&mut self.icon_cache);
                             }
                         }
                         BatteryEvent::Status(x) => {
                             if bat.status.update(x) {
-                                self.reload_battery_icon();
+                                bat.load_icon(&mut self.icon_cache);
                             }
                         }
                     };
@@ -487,14 +573,14 @@ impl Runner {
                     let icon_name = TinyString::from_str(unsafe {
                         str::from_utf8_unchecked(icon_name.as_bytes())
                     });
-                    let icon = self.load_icon(&icon_name.into(), false);
+                    let icon = self.icon_cache.load_icon(&icon_name.into(), false);
                     self.tray_items.insert(service.clone(), TrayItem { icon });
                 }
                 TrayEvent::NewIcon { service, icon_name } => {
                     let icon_name = TinyString::from_str(unsafe {
                         str::from_utf8_unchecked(icon_name.as_bytes())
                     });
-                    let icon = self.load_icon(&icon_name.into(), false);
+                    let icon = self.icon_cache.load_icon(&icon_name.into(), false);
                     if let Some(item) = self.tray_items.get_mut(&service) {
                         item.icon = icon;
                     }
@@ -506,6 +592,18 @@ impl Runner {
                     self.tray_items.clear();
                 }
             },
+            AppEvent::Backlight => {
+                self.backlight
+                    .as_mut()
+                    .unwrap()
+                    .update(&mut self.icon_cache);
+                if let (Some(Tooltip { text, .. }), Some(backlight)) =
+                    (&mut self.tooltip, &self.backlight)
+                {
+                    update_tooltip = true;
+                    *text = backlight.tooltip()
+                }
+            }
         }
         for w in self.window_manager.iter() {
             w.state.borrow_mut().config_state.outdate();
@@ -566,37 +664,18 @@ impl Runner {
         .width(Length::Fill)
         .height(Length::Fill);
 
-        let right = widget::row![self.tray(), self.battery(), self.clock().into()]
-            .align_y(Center)
-            .padding(Padding::new(0.0).right(13))
-            .spacing(9)
-            .height(Length::Fill);
+        let right = widget::row![
+            self.tray(),
+            self.backlight(),
+            self.battery(),
+            self.clock().into()
+        ]
+        .align_y(Center)
+        .padding(Padding::new(0.0).right(13))
+        .spacing(9)
+        .height(Length::Fill);
 
         widget::row![left, right].into()
-    }
-    #[must_use]
-    fn load_icon(&mut self, key: &TinyString, symbolic: bool) -> Option<Handle> {
-        self.icon_cache
-            .get_or_insert_ref(key, || {
-                cosmic_freedesktop_icons::lookup(key)
-                    .with_size(64)
-                    // .with_theme("Adwaita")
-                    .with_theme("Tela-dracula-dark")
-                    // .with_theme("Papirus")
-                    .find()
-                    .and_then(|path| match path.extension()?.as_encoded_bytes() {
-                        b"svg" => {
-                            if symbolic {
-                                load_symbolic(path, &theme()).map(Handle::Svg)
-                            } else {
-                                load_svg(path).map(Handle::Svg)
-                            }
-                        }
-                        b"png" => load_png(path).map(Handle::Pixmap),
-                        _ => None,
-                    })
-            })
-            .clone()
     }
     fn logo(&self) -> impl Into<Element<'_>> {
         button(
@@ -694,10 +773,17 @@ impl Runner {
         .spacing(7)
         .into()
     }
-    fn battery(&self) -> Option<Element<'_>> {
-        let icon = self.battery_icon.clone()?.load_size(17.5);
+    fn backlight(&self) -> Option<Element<'_>> {
         Some(
-            mouse_area(icon)
+            mouse_area(self.backlight.as_ref()?.icon.clone()?.load_size(17.5))
+                .on_enter(Message::Backlight)
+                .on_exit(Message::CloseTooltip)
+                .into(),
+        )
+    }
+    fn battery(&self) -> Option<Element<'_>> {
+        Some(
+            mouse_area(self.battery_status.as_ref()?.icon.clone()?.load_size(17.5))
                 .on_enter(Message::Battery)
                 .on_exit(Message::BatteryStop)
                 .into(),
@@ -724,11 +810,6 @@ impl Runner {
             .padding(Padding::default().bottom(4.5))
             .into();
         row([date, time, weekday]).spacing(7)
-    }
-    fn reload_battery_icon(&mut self) {
-        if let Some(bat) = &self.battery_status {
-            self.battery_icon = self.load_icon(&bat.icon().into(), true);
-        }
     }
 }
 

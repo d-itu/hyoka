@@ -1,7 +1,7 @@
 use crate::{
     Split,
     consumer::program::{Message, Runner},
-    modules::{self, battery, dbus::TrayEvent, hyprland, polling, uevent},
+    modules::{self, dbus::TrayEvent, fs, hyprland, polling, uevent},
     wayland,
 };
 use derive_more::From;
@@ -26,6 +26,7 @@ enum AppEvent {
     Battery(BatteryEvent),
     Tray(TrayEvent),
     Polling(polling::Event),
+    Backlight,
 }
 
 #[derive(Debug)]
@@ -33,7 +34,7 @@ enum BatteryEvent {
     PowerOnline,
     PowerOffline,
     Capacity(u8),
-    Status(battery::Status),
+    Status(fs::ChargingStatus),
 }
 
 pub async fn run() {
@@ -90,6 +91,9 @@ pub async fn run() {
                 }
                 uevent::Event::BatStatus(x) => {
                     events.send(BatteryEvent::Status(x).into()).await.unwrap()
+                }
+                uevent::Event::Backlight => {
+                    events.send(AppEvent::Backlight.into()).await.unwrap();
                 }
             })
             .await;

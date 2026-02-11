@@ -1,22 +1,20 @@
-use std::{io, mem::MaybeUninit, os::fd::OwnedFd};
+use std::io;
 
 use compio::{io::AsyncRead, net::UnixStream};
-use rustix::{
-    fs::{Mode, OFlags},
-    net::{
-        AddressFamily, SocketType,
-        netlink::{KOBJECT_UEVENT, SocketAddrNetlink},
-    },
+use rustix::net::{
+    AddressFamily, SocketType,
+    netlink::{KOBJECT_UEVENT, SocketAddrNetlink},
 };
 
-use crate::{mapping::Mapping, modules::battery};
+use crate::{mapping::Mapping, modules::fs};
 
 #[derive(Debug)]
 pub enum Event {
     PowerOnline,
     PowerOffline,
     BatCapacity(u8),
-    BatStatus(battery::Status),
+    BatStatus(fs::ChargingStatus),
+    Backlight,
 }
 
 fn uevent() -> io::Result<UnixStream> {
@@ -80,7 +78,7 @@ impl Listener {
                         capacity = Some(u8::from_ascii(v.as_bytes()).unwrap());
                     }
                     "POWER_SUPPLY_STATUS" => {
-                        status = Some(battery::Status::from_bytes(v.as_bytes()));
+                        status = Some(fs::ChargingStatus::from_bytes(v.as_bytes()));
                     }
                     _ => {}
                 }
@@ -105,8 +103,9 @@ impl Listener {
                         }
                     }
                 }
-
-                Some(Subsystem::Backlight) => {}
+                Some(Subsystem::Backlight) => {
+                    dispatch(Event::Backlight).await;
+                }
                 _ => {}
             }
         }
@@ -120,23 +119,4 @@ fn parse_message(data: &[u8]) -> Option<(&str, impl Iterator<Item = (&str, &str)
         .map_while(|x| x.split_once(|&x| x == b'='))
         .map(|(k, v)| unsafe { (str::from_utf8_unchecked(k), str::from_utf8_unchecked(v)) });
     Some((head, lines))
-}
-
-#[allow(dead_code)]
-fn backlight() -> Option<OwnedFd> {
-    let fd = rustix::fs::open(c"/sys/class/backlight", OFlags::empty(), Mode::empty()).ok()?;
-    let mut buf = [MaybeUninit::uninit(); 1024];
-    let mut dir = rustix::fs::RawDir::new(&fd, &mut buf);
-    while let Some(entry) = dir.next() {
-        let entry = entry.unwrap();
-
-        // skip . and ..
-        if unsafe { *(entry.file_name().as_ptr() as *const u8) } == b'.' {
-            continue;
-        }
-        let name = entry.file_name();
-        let device = rustix::fs::openat(&fd, name, OFlags::empty(), Mode::empty()).unwrap();
-        return Some(device);
-    }
-    None
 }
