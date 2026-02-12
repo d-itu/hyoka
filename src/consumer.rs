@@ -26,6 +26,7 @@ enum AppEvent {
     Battery(BatteryEvent),
     Tray(TrayEvent),
     Polling(polling::Event),
+    Pipewire(modules::pipewire::Event),
     Backlight,
 }
 
@@ -38,20 +39,20 @@ enum BatteryEvent {
 }
 
 pub async fn run() {
-    let (mut notifier, mut receiver) = mpsc::channel(4);
+    let (mut sender, mut receiver) = mpsc::channel(4);
 
     let (wayland_daemon, wayland_proxy, mut wayland_events) = wayland::new();
-    let mut sender = notifier.clone();
+    let mut events = sender.clone();
     let wayland = async move {
         loop {
-            sender
+            events
                 .send(Event::Wayland(wayland_events.next().await.unwrap()))
                 .await
                 .unwrap();
         }
     };
 
-    let mut sender = notifier.clone();
+    let mut events = sender.clone();
     let (hyprland_daemon, hyprctl) = hyprland::new().await.split();
     let init = if let Some(x) = hyprctl.as_ref() {
         Some(x.controller().await)
@@ -63,7 +64,7 @@ pub async fn run() {
             Some(daemon) => {
                 daemon
                     .run(init.unwrap(), async |event| {
-                        sender
+                        events
                             .send(Event::App(AppEvent::Hyprland(event)))
                             .await
                             .unwrap();
@@ -74,7 +75,7 @@ pub async fn run() {
         }
     };
 
-    let mut events = notifier.clone();
+    let mut events = sender.clone();
     let uevent = uevent::new();
     let uevent = async {
         uevent
@@ -99,21 +100,31 @@ pub async fn run() {
             .await;
     };
 
-    let mut sender = notifier.clone();
+    let mut events = sender.clone();
+    let pipewire = modules::pipewire::Daemon::new().ok();
+    let pipewire = async {
+        if let Some(daemon) = pipewire {
+            daemon
+                .listen(async |e| events.send(e.into()).await.unwrap())
+                .await
+        }
+    };
+
+    let mut events = sender.clone();
     let (polling_controller, mut signals) = mpsc::channel(1);
     let polling = polling::run(&mut signals, async |e| {
-        sender.send(e.into()).await.unwrap();
+        events.send(e.into()).await.unwrap();
     });
 
-    let sender = notifier.clone();
-    let (dbus_daemon, dbus_proxy) = modules::dbus::new(Dispatcher(sender)).await.split();
+    let events = sender.clone();
+    let (dbus_daemon, dbus_proxy) = modules::dbus::new(Dispatcher(events)).await.split();
     let dbus = async {
         if let Some(daemon) = dbus_daemon {
             daemon.serve().await;
         }
     };
 
-    notifier.flush().await.unwrap();
+    sender.flush().await.unwrap();
     let mut runner = Runner::new(
         wayland_proxy,
         wayland_daemon.display(),
@@ -138,6 +149,7 @@ pub async fn run() {
         wayland,
         consumer,
         hyprland,
+        pipewire,
         uevent,
         polling,
         dbus

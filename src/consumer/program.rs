@@ -59,6 +59,7 @@ pub enum Message {
     CloseTooltip,
     BatteryStop,
     Backlight,
+    Volume,
 }
 
 type Callbacks = FxHashMap<wayland::Callback, Box<dyn FnOnce(&mut Runner)>>;
@@ -126,7 +127,7 @@ impl BatteryStatus {
         Some(res)
     }
     fn load_icon(&mut self, icon_cache: &mut IconCache) {
-        self.icon = icon_cache.load_icon(&self.icon().into(), true);
+        self.icon = icon_cache.load(&self.icon().into(), true);
     }
     fn charged(&self) -> bool {
         self.status.0 == ChargingStatus::Full || self.capacity.0 >= 99
@@ -172,17 +173,60 @@ impl BacklightStatus {
         }
     }
     fn load_icon(&mut self, icon_cache: &mut IconCache) {
-        self.icon = icon_cache.load_icon(&self.icon().to_string().into(), true)
+        self.icon = icon_cache.load(&self.icon().to_string().into(), true)
     }
     fn update(&mut self, icon_cache: &mut IconCache) {
         self.percentage = self.device.percentage();
         self.load_icon(icon_cache)
     }
-    fn tooltip(&self) -> TooltipText {
-        let mut buf = TinyString::new();
+    fn tooltip(&self) -> TooltipContent {
+        let mut text = TinyString::new();
         use std::fmt::Write;
-        write!(&mut buf, "{}", self.percentage).unwrap();
-        TooltipText::Simple(buf)
+        write!(&mut text, "{}", self.percentage).unwrap();
+        TooltipContent {
+            token: TooltipToken::Backlight,
+            text,
+        }
+    }
+}
+
+#[derive(Default)]
+struct Volume {
+    mute: Option<bool>,
+    value: Option<f32>,
+    icon: Option<Handle>,
+}
+
+impl Volume {
+    fn icon(&self) -> Option<&'static str> {
+        Some(if self.mute? {
+            "audio-volume-muted-symbolic"
+        } else {
+            match self.value? {
+                ..0.33 => "audio-volume-low-symbolic",
+                0.33..=0.67 => "audio-volume-medium-symbolic",
+                0.67..1.0 => "audio-volume-high-symbolic",
+                1.0.. => "audio-volume-overamplified-symbolic",
+                _ => None?,
+            }
+        })
+    }
+    fn load_icon(&mut self, icon_cache: &mut IconCache) -> Option<()> {
+        self.icon = icon_cache.load(&self.icon()?.to_string().into(), true);
+        Some(())
+    }
+    fn tooltip(&self) -> Option<TooltipContent> {
+        let mut text = TinyString::new();
+        use std::fmt::Write;
+        if self.mute? {
+            write!(&mut text, "Muted").unwrap();
+        } else {
+            write!(&mut text, "{:.0}", self.value? * 100.0).unwrap();
+        }
+        Some(TooltipContent {
+            token: TooltipToken::Volume,
+            text,
+        })
     }
 }
 
@@ -204,22 +248,31 @@ impl Handle {
     }
 }
 
-enum TooltipText {
-    WindowInfo(String),
-    Simple(TinyString),
+#[derive(PartialEq)]
+enum TooltipToken {
+    WindowInfo,
+    Tray(Tray),
+    Volume,
+    Backlight,
+    Battery,
 }
 
-impl TooltipText {
+struct TooltipContent {
+    token: TooltipToken,
+    text: TinyString,
+}
+
+impl TooltipContent {
     fn view(&self) -> Element<'_> {
-        match self {
-            TooltipText::WindowInfo(s) => tooltip_text(s.trim_end(), 13.0, Shaping::Auto),
-            TooltipText::Simple(s) => tooltip_text(s, 10.0, Shaping::Basic),
+        match self.token {
+            TooltipToken::WindowInfo => tooltip_text(&self.text.trim_end(), 13.0, Shaping::Auto),
+            _ => tooltip_text(&self.text, 10.0, Shaping::Basic),
         }
     }
 }
 
 struct Tooltip {
-    text: TooltipText,
+    content: TooltipContent,
     window: Window,
 }
 
@@ -245,6 +298,7 @@ pub struct Runner {
 
     battery_status: Option<BatteryStatus>,
     backlight: Option<BacklightStatus>,
+    volume: Volume,
 
     date: ArrayVec<u8, 12>,
     time: [u8; 8],
@@ -263,11 +317,11 @@ impl IconCache {
         ))
     }
     #[must_use]
-    fn load_icon(&mut self, key: &TinyString, symbolic: bool) -> Option<Handle> {
+    fn with_size(&mut self, key: &TinyString, size: u16, symbolic: bool) -> Option<Handle> {
         self.0
             .get_or_insert_ref(key, || {
                 cosmic_freedesktop_icons::lookup(key)
-                    .with_size(64)
+                    .with_size(size)
                     // .with_theme("Adwaita")
                     .with_theme("Tela-dracula-dark")
                     // .with_theme("Papirus")
@@ -285,6 +339,10 @@ impl IconCache {
                     })
             })
             .clone()
+    }
+    #[must_use]
+    fn load(&mut self, key: &TinyString, symbolic: bool) -> Option<Handle> {
+        self.with_size(key, 16, symbolic)
     }
 }
 
@@ -383,6 +441,7 @@ impl Runner {
             tray_items: AHashMap::with_hasher(ahash::RandomState::with_seeds(114, 514, 1919, 810)),
             battery_status: BatteryStatus::new(&mut icon_cache),
             backlight: BacklightStatus::new(&mut icon_cache),
+            volume: Default::default(),
             date: now.date(),
             time: now.time(),
             weekday: now.weekday(),
@@ -393,7 +452,7 @@ impl Runner {
         match tag {
             Tag::Bar => self.bar(),
             Tag::Tooltip => match self.tooltip {
-                Some(Tooltip { ref text, .. }) => text.view(),
+                Some(Tooltip { ref content, .. }) => content.view(),
                 None => "".into(),
             },
         }
@@ -403,8 +462,7 @@ impl Runner {
             self.window_manager.close_window(tooltip.window.surface());
         }
     }
-    fn set_tooltip(&mut self, text: TooltipText) -> Option<()> {
-        self.close_tooltip();
+    fn set_tooltip(&mut self, content: TooltipContent) -> Option<()> {
         let w = self.window_manager.focused()?.clone();
         let state = w.state.borrow();
         if let Cursor::Available(Point { x, .. }) = state.cursor {
@@ -412,12 +470,12 @@ impl Runner {
                 &mut self.wayland,
                 &mut self.window_manager,
                 self.display,
-                text.view(),
+                content.view(),
                 [x as _, BAR_HEIGHT + 1],
                 &w.surface().role,
             )
             .cloned()
-            .map(|window| Tooltip { text, window });
+            .map(|window| Tooltip { content, window });
         }
         Some(())
     }
@@ -443,12 +501,16 @@ impl Runner {
                 {
                     hyprland::Response::Raw(s) => s,
                 };
-                self.set_tooltip(TooltipText::WindowInfo(res.replace('\t', "        ")));
+                self.set_tooltip(TooltipContent {
+                    token: TooltipToken::WindowInfo,
+                    text: res.replace('\t', "        ").into(),
+                });
             }
             Message::Battery => {
-                self.set_tooltip(TooltipText::Simple(
-                    self.battery_status.as_ref()?.device.info().tooltip(),
-                ));
+                self.set_tooltip(TooltipContent {
+                    token: TooltipToken::Battery,
+                    text: self.battery_status.as_ref()?.device.info().tooltip(),
+                });
                 self.polling
                     .send(polling::Signal::Battery(
                         self.battery_status.as_ref()?.device.clone(),
@@ -459,10 +521,17 @@ impl Runner {
             Message::Backlight => {
                 self.set_tooltip(self.backlight.as_ref()?.tooltip())?;
             }
+            Message::Volume => {
+                self.set_tooltip(self.volume.tooltip()?)?;
+            }
             Message::TrayTooltip(service) => {
-                let content =
-                    TinyString::from_string(self.dbus.as_mut()?.tray_tooltip(service).await?);
-                self.set_tooltip(TooltipText::Simple(content));
+                let content = TinyString::from_string(
+                    self.dbus.as_mut()?.tray_tooltip(service.clone()).await?,
+                );
+                self.set_tooltip(TooltipContent {
+                    token: TooltipToken::Tray(service),
+                    text: content,
+                });
             }
             Message::BatteryStop => {
                 self.close_tooltip();
@@ -522,7 +591,7 @@ impl Runner {
                         icon: if class.is_empty() {
                             None
                         } else {
-                            self.icon_cache.load_icon(&class, false)
+                            self.icon_cache.load(&class, false)
                         },
                         class: truncate(class.clone(), 15, "…"),
                         title: truncate(title.clone(), 50, "…"),
@@ -562,9 +631,17 @@ impl Runner {
                     self.weekday = e.weekday();
                 }
                 polling::Event::Battery(info) => {
-                    update_tooltip = true;
-                    if let Some(Tooltip { text, .. }) = &mut self.tooltip {
-                        *text = TooltipText::Simple(info.tooltip())
+                    if let Some(Tooltip {
+                        content:
+                            TooltipContent {
+                                token: TooltipToken::Battery,
+                                text,
+                            },
+                        ..
+                    }) = &mut self.tooltip
+                    {
+                        update_tooltip = true;
+                        *text = info.tooltip()
                     }
                 }
             },
@@ -573,14 +650,14 @@ impl Runner {
                     let icon_name = TinyString::from_str(unsafe {
                         str::from_utf8_unchecked(icon_name.as_bytes())
                     });
-                    let icon = self.icon_cache.load_icon(&icon_name.into(), false);
+                    let icon = self.icon_cache.load(&icon_name.into(), false);
                     self.tray_items.insert(service.clone(), TrayItem { icon });
                 }
                 TrayEvent::NewIcon { service, icon_name } => {
                     let icon_name = TinyString::from_str(unsafe {
                         str::from_utf8_unchecked(icon_name.as_bytes())
                     });
-                    let icon = self.icon_cache.load_icon(&icon_name.into(), false);
+                    let icon = self.icon_cache.load(&icon_name.into(), false);
                     if let Some(item) = self.tray_items.get_mut(&service) {
                         item.icon = icon;
                     }
@@ -597,11 +674,47 @@ impl Runner {
                     .as_mut()
                     .unwrap()
                     .update(&mut self.icon_cache);
-                if let (Some(Tooltip { text, .. }), Some(backlight)) =
-                    (&mut self.tooltip, &self.backlight)
+                if let (
+                    Some(Tooltip {
+                        content:
+                            TooltipContent {
+                                token: TooltipToken::Backlight,
+                                text,
+                            },
+                        ..
+                    }),
+                    Some(backlight),
+                ) = (&mut self.tooltip, &self.backlight)
                 {
                     update_tooltip = true;
-                    *text = backlight.tooltip()
+                    *text = backlight.tooltip().text
+                }
+            }
+            AppEvent::Pipewire(e) => {
+                match e {
+                    modules::pipewire::Event::Volume(x) => {
+                        self.volume.value = Some(x);
+                        self.volume.load_icon(&mut self.icon_cache);
+                    }
+                    modules::pipewire::Event::Mute(x) => {
+                        self.volume.mute = Some(x);
+                        self.volume.load_icon(&mut self.icon_cache);
+                    }
+                };
+                if let (
+                    Some(Tooltip {
+                        content:
+                            TooltipContent {
+                                token: TooltipToken::Volume,
+                                text,
+                            },
+                        ..
+                    }),
+                    Some(x),
+                ) = (&mut self.tooltip, self.volume.tooltip())
+                {
+                    update_tooltip = true;
+                    *text = x.text
                 }
             }
         }
@@ -666,6 +779,7 @@ impl Runner {
 
         let right = widget::row![
             self.tray(),
+            self.volume(),
             self.backlight(),
             self.battery(),
             self.clock().into()
@@ -772,6 +886,14 @@ impl Runner {
             }))
         .spacing(7)
         .into()
+    }
+    fn volume(&self) -> Option<Element<'_>> {
+        Some(
+            mouse_area(self.volume.icon.clone()?.load_size(17.5))
+                .on_enter(Message::Volume)
+                .on_exit(Message::CloseTooltip)
+                .into(),
+        )
     }
     fn backlight(&self) -> Option<Element<'_>> {
         Some(
