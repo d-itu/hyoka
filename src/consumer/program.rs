@@ -12,7 +12,8 @@ use arrayvec::ArrayVec;
 use derive_more::{Deref, From};
 use futures::{SinkExt as _, channel::mpsc::Sender};
 use iced::{
-    Alignment, Border, Center, Color, Font, Length, Padding, Pixels, Point, Size, Theme, color,
+    Alignment, Border, Center, Color, Font, Length, Padding, Pixels, Point, Shadow, Size, Theme,
+    color,
     font::{Family, Stretch, Style, Weight},
     mouse::Cursor,
     theme::Palette,
@@ -463,6 +464,9 @@ impl Runner {
         }
     }
     fn set_tooltip(&mut self, content: TooltipContent) -> Option<()> {
+        if self.tooltip.is_some() {
+            None?
+        }
         let w = self.window_manager.focused()?.clone();
         let state = w.state.borrow();
         if let Cursor::Available(Point { x, .. }) = state.cursor {
@@ -827,9 +831,7 @@ impl Runner {
             .style(move |theme: &Theme, status| button::Style {
                 background: match (status, focused) {
                     (button::Status::Hovered, true) => Some(theme.palette().primary.into()),
-                    (button::Status::Hovered, false) => {
-                        Some(theme.palette().primary.with_alpha(0.18).into())
-                    }
+                    (button::Status::Hovered, false) => None,
                     (_, true) => Some(theme.palette().text.into()),
                     (_, false) => None,
                 },
@@ -841,6 +843,18 @@ impl Runner {
                     },
                 },
                 border: Border::default().rounded(3),
+                shadow: match status {
+                    button::Status::Hovered => Shadow {
+                        color: theme.palette().primary.with_alpha(if focused {
+                            0.55
+                        } else {
+                            0.34
+                        }),
+                        blur_radius: 10.0,
+                        ..Default::default()
+                    },
+                    _ => Default::default(),
+                },
                 ..Default::default()
             })
             .padding(0)
