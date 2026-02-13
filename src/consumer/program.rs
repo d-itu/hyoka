@@ -212,7 +212,7 @@ impl Volume {
         })
     }
     fn load_icon(&mut self, icon_cache: &mut IconCache) -> Option<()> {
-        self.icon = icon_cache.load(&self.icon()?.to_string().into(), true);
+        self.icon = icon_cache.with_size(&self.icon()?.to_string().into(), 16, true);
         Some(())
     }
     fn tooltip(&self) -> Option<TooltipContent> {
@@ -342,7 +342,7 @@ impl IconCache {
     }
     #[must_use]
     fn load(&mut self, key: &TinyString, symbolic: bool) -> Option<Handle> {
-        self.with_size(key, 16, symbolic)
+        self.with_size(key, 64, symbolic)
     }
 }
 

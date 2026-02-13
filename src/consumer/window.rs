@@ -16,7 +16,6 @@ use iced::{
     window::RedrawRequest,
 };
 use iced_core::{
-    clipboard,
     renderer::Style,
     widget::{Operation, operation::Focusable},
 };
@@ -221,7 +220,6 @@ impl State {
                 ))],
                 self.cursor,
                 &mut self.renderer,
-                &mut Clipboard,
                 &mut vec![],
             );
             ui.draw(
@@ -490,7 +488,6 @@ impl Window {
                     &[iced::Event::Mouse(event)],
                     *cursor,
                     renderer,
-                    &mut Clipboard,
                     &mut messages,
                 );
                 if let iced_runtime::user_interface::State::Updated {
@@ -620,19 +617,6 @@ impl wayland::Globals {
             viewport,
             ptr: NonNull::new(ptr).unwrap(),
         }
-    }
-}
-
-struct Clipboard;
-
-impl clipboard::Clipboard for Clipboard {
-    fn read(&self, kind: clipboard::Kind) -> Option<String> {
-        _ = kind;
-        None
-    }
-
-    fn write(&mut self, kind: clipboard::Kind, contents: String) {
-        _ = (kind, contents);
     }
 }
 

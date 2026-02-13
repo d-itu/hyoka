@@ -44,6 +44,9 @@ where
                 iced_runtime::Action::Image(action) => {
                     eprintln!("image");
                 }
+                iced_runtime::Action::Event { window, event } => {
+                    eprintln!("event");
+                }
                 iced_runtime::Action::Tick => {
                     eprintln!("tick");
                 }
