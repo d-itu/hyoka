@@ -53,6 +53,7 @@ impl Runner {
     fn workspace_item(&self, idx: usize) -> Element<'_> {
         let id = (idx + 1) as _;
         let alive = self.workspaces.get(idx);
+        let urgent = self.urgent_workspaces.get(idx);
         let focused = idx == self.workspace_focused;
         let text: Element = if focused {
             text(id % 10).size(11.5).shaping(Shaping::Basic).into()
@@ -72,9 +73,9 @@ impl Runner {
                     (button::Status::Hovered, true) => Some(theme.palette().primary.into()),
                     (button::Status::Hovered, false) => None,
                     (_, true) => Some(theme.palette().text.into()),
-                    (_, false) => None,
+                    (_, false) => urgent.then_some(theme.palette().danger.into()),
                 },
-                text_color: match focused {
+                text_color: match focused || urgent {
                     true => theme.palette().background.with_alpha(1.0),
                     false => match status {
                         button::Status::Hovered => theme.palette().primary,

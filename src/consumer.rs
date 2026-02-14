@@ -1,5 +1,5 @@
 use crate::{
-    Split,
+    Split, TinyString,
     consumer::program::{Message, Runner},
     modules::{self, dbus::TrayEvent, fs, hyprland, polling, uevent},
     wayland,
@@ -23,6 +23,8 @@ enum Event {
 #[derive(Debug, From)]
 enum AppEvent {
     Hyprland(hyprland::Event),
+    WindowInfo(String),
+    Urgent(usize),
     Battery(BatteryEvent),
     Tray(TrayEvent),
     Polling(polling::Event),
@@ -36,6 +38,20 @@ enum BatteryEvent {
     PowerOffline,
     Capacity(u8),
     Status(fs::ChargingStatus),
+}
+
+enum HyprlandReqToken {
+    ActiveWindow,
+    Urgent { win: TinyString },
+}
+
+#[derive(From)]
+enum HyprlandRequest {
+    Command(hyprland::Command),
+    Query {
+        query: hyprland::Query,
+        token: HyprlandReqToken,
+    },
 }
 
 pub async fn run() {
@@ -52,27 +68,85 @@ pub async fn run() {
         }
     };
 
-    let mut events = sender.clone();
-    let (hyprland_daemon, hyprctl) = hyprland::new().await.split();
-    let init = if let Some(x) = hyprctl.as_ref() {
+    let (hyprland_daemon, hyprland_ctx) = hyprland::new().await.split();
+    let init = if let Some(x) = hyprland_ctx.as_ref() {
         Some(x.controller().await)
     } else {
         None
     };
+    let (hyprland_requests_sender, mut hyprland_requests_receiver) = mpsc::channel(1);
+    let mut events = sender.clone();
     let hyprland = async {
-        match hyprland_daemon {
-            Some(daemon) => {
-                daemon
-                    .run(init.unwrap(), async |event| {
-                        events
-                            .send(Event::App(AppEvent::Hyprland(event)))
-                            .await
-                            .unwrap();
-                    })
-                    .await
+        let mut sender = events.clone();
+        let daemon = async {
+            match hyprland_daemon {
+                Some(daemon) => {
+                    daemon
+                        .run(init.unwrap(), async |event| {
+                            sender
+                                .send(Event::App(AppEvent::Hyprland(event)))
+                                .await
+                                .unwrap();
+                        })
+                        .await
+                }
+                None => {}
             }
-            None => {}
-        }
+        };
+        let queries = async {
+            if let Some(ctx) = hyprland_ctx {
+                loop {
+                    let requests = hyprland_requests_receiver.next().await.unwrap();
+                    match requests {
+                        HyprlandRequest::Command(command) => {
+                            ctx.controller().await.command(command).await
+                        }
+                        HyprlandRequest::Query { query, token } => {
+                            let res = ctx.controller().await.query(query).await;
+                            match res {
+                                hyprland::Response::Raw(res) => match token {
+                                    HyprlandReqToken::ActiveWindow => {
+                                        events.send(AppEvent::WindowInfo(res).into()).await.unwrap()
+                                    }
+                                    HyprlandReqToken::Urgent { win } => {
+                                        fn find_workspace(
+                                            win: TinyString,
+                                            res: String,
+                                        ) -> Option<usize> {
+                                            let mut window_found = false;
+                                            for line in res.as_bytes().split(|&x| x == b'\n') {
+                                                if line.starts_with(b"Window") {
+                                                    if line[b"Window ".len()..]
+                                                        .starts_with(win.as_bytes())
+                                                    {
+                                                        window_found = true;
+                                                    }
+                                                } else if window_found
+                                                    && line.starts_with(b"\tworkspace")
+                                                {
+                                                    let workspace = &line[b"\tworkspace: ".len()..];
+                                                    let (id, _) =
+                                                        workspace.split_once(|&x| x == b' ')?;
+                                                    return Some(usize::from_ascii(id).unwrap());
+                                                }
+                                            }
+                                            None
+                                        }
+                                        if let Some(workspace) = find_workspace(win, res) {
+                                            events
+                                                .send(AppEvent::Urgent(workspace).into())
+                                                .await
+                                                .unwrap()
+                                        }
+                                    }
+                                },
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        std::future::join!(daemon, queries).await
     };
 
     let mut events = sender.clone();
@@ -128,7 +202,7 @@ pub async fn run() {
     let mut runner = Runner::new(
         wayland_proxy,
         wayland_daemon.display(),
-        hyprctl,
+        hyprland_requests_sender,
         dbus_proxy,
         polling_controller,
     );
@@ -139,7 +213,7 @@ pub async fn run() {
                 Event::Wayland(event) => {
                     runner.dispatch_wayland_event(event).await;
                 }
-                Event::App(event) => runner.dispatch_app_event(event),
+                Event::App(event) => runner.dispatch_app_event(event).await,
             }
         }
     };

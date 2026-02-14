@@ -67,6 +67,9 @@ pub enum Event {
         class: TinyString,
         title: TinyString,
     },
+    Urgent {
+        win: TinyString,
+    },
 }
 
 impl Listener {
@@ -78,38 +81,29 @@ impl Listener {
             usize::from_ascii(id).ok()
         }
 
-        async fn parse_line(line: &[u8], dispatch: &mut impl AsyncFnMut(Event)) -> Option<()> {
+        fn parse_line(line: &[u8]) -> Option<Event> {
             let idx = line.iter().position(|&x| x == b'>')?;
             let event_type = unsafe { line.get_unchecked(..idx) };
             let event_body = unsafe { line.get_unchecked(idx + 2..) };
             match event_type {
-                b"workspacev2" => {
-                    dispatch(Event::Workspace {
-                        id: parse_workspace(event_body)?,
-                    })
-                    .await;
-                    Some(())
-                }
-                b"createworkspacev2" => {
-                    dispatch(Event::CreateWorkspace {
-                        id: parse_workspace(event_body)?,
-                    })
-                    .await;
-                    Some(())
-                }
-                b"destroyworkspacev2" => {
-                    dispatch(Event::DestroyWorkspace {
-                        id: parse_workspace(event_body)?,
-                    })
-                    .await;
-                    Some(())
-                }
+                b"workspacev2" => Some(Event::Workspace {
+                    id: parse_workspace(event_body)?,
+                }),
+                b"createworkspacev2" => Some(Event::CreateWorkspace {
+                    id: parse_workspace(event_body)?,
+                }),
+                b"destroyworkspacev2" => Some(Event::DestroyWorkspace {
+                    id: parse_workspace(event_body)?,
+                }),
                 b"activewindow" => {
                     let (class, title) = event_body.split_once(|&x| x == b',')?;
                     let [class, title] =
                         [class, title].map(|x| unsafe { str::from_utf8_unchecked(x) }.into());
-                    dispatch(Event::ActiveWindow { class, title }).await;
-                    Some(())
+                    Some(Event::ActiveWindow { class, title })
+                }
+                b"urgent" => {
+                    let win = unsafe { str::from_utf8_unchecked(event_body) }.into();
+                    Some(Event::Urgent { win })
                 }
                 _ => None,
             }
@@ -122,20 +116,21 @@ impl Listener {
             let buf = unsafe { buffer.as_bytes_mut().get_unchecked(..n) };
 
             for line in buf.split(|&x| x == b'\n') {
-                parse_line(line, &mut dispatch).await;
+                if let Some(e) = parse_line(line) {
+                    dispatch(e).await;
+                }
             }
         }
     }
 }
 
-#[derive(Clone)]
 pub enum Command {
     Workspace(u8),
 }
 
-#[derive(Clone)]
-pub enum Request {
+pub enum Query {
     ActiveWindow,
+    Clients,
 }
 
 #[derive(Debug)]
@@ -156,7 +151,7 @@ impl Controller {
         self.stream.write(buf).await.unwrap();
     }
 
-    pub async fn raw_request(mut self, msg: impl IoBuf) -> String {
+    pub async fn raw_query(mut self, msg: impl IoBuf) -> String {
         self.stream.write(msg).await.unwrap();
 
         let buf = Vec::with_capacity(1024);
@@ -164,11 +159,12 @@ impl Controller {
         unsafe { String::from_utf8_unchecked(buf) }
     }
 
-    pub async fn request(self, req: Request) -> Response {
-        let msg = match req {
-            Request::ActiveWindow => b"activewindow",
+    pub async fn query(self, req: Query) -> Response {
+        let msg: &[u8] = match req {
+            Query::ActiveWindow => b"activewindow",
+            Query::Clients => b"clients",
         };
-        let raw = self.raw_request(msg).await;
+        let raw = self.raw_query(msg).await;
         Response::Raw(raw)
     }
 }
@@ -182,7 +178,7 @@ impl Daemon {
         let Self { listener } = self;
 
         let res = init
-            .raw_request("[[BATCH]]workspaces;activeworkspace;activewindow")
+            .raw_query("[[BATCH]]workspaces;activeworkspace;activewindow")
             .await;
         let mut res = res.split("\n\n\n\n\n");
         if let Some(workspaces) = res.next() {

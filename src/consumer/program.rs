@@ -31,7 +31,7 @@ use rustix::{
 use crate::{
     TinyString,
     consumer::{
-        AppEvent, BatteryEvent, Dispatcher, Element,
+        AppEvent, BatteryEvent, Dispatcher, Element, HyprlandReqToken, HyprlandRequest,
         window::{Role, Tag, Window, WindowManager},
     },
     mapping::Mapping,
@@ -278,7 +278,7 @@ struct Tooltip {
 
 pub struct Runner {
     pub wayland: wayland::Proxy,
-    hyprctl: Option<hyprland::Context>,
+    hyprctl: Sender<HyprlandRequest>,
     dbus: Option<modules::dbus::Proxy<Dispatcher>>,
     polling: Sender<polling::Signal>,
 
@@ -291,6 +291,7 @@ pub struct Runner {
     pub theme: Theme,
 
     workspaces: BitSet,
+    urgent_workspaces: BitSet,
     workspace_focused: usize,
     window: WindowInfo,
 
@@ -350,7 +351,7 @@ impl Runner {
     pub fn new(
         mut wayland: wayland::Proxy,
         display: NonNull<wayland::ffi::wl_display>,
-        hyprctl: Option<hyprland::Context>,
+        hyprctl: Sender<HyprlandRequest>,
         dbus: Option<modules::dbus::Proxy<Dispatcher>>,
         polling: Sender<polling::Signal>,
     ) -> Self {
@@ -432,6 +433,7 @@ impl Runner {
             callbacks: Default::default(),
 
             workspaces: BitSet::new(),
+            urgent_workspaces: BitSet::new(),
             workspace_focused: usize::MAX,
             window: WindowInfo {
                 class: TinyString::new(),
@@ -487,27 +489,18 @@ impl Runner {
             Message::Hello => {}
             Message::Workspace { id } => {
                 self.hyprctl
-                    .as_mut()?
-                    .controller()
+                    .send(hyprland::Command::Workspace(id).into())
                     .await
-                    .command(hyprland::Command::Workspace(id))
-                    .await;
+                    .unwrap();
             }
             Message::WindowInfo => {
-                let res = match self
-                    .hyprctl
-                    .as_mut()?
-                    .controller()
+                self.hyprctl
+                    .send(HyprlandRequest::Query {
+                        query: hyprland::Query::ActiveWindow,
+                        token: HyprlandReqToken::ActiveWindow,
+                    })
                     .await
-                    .request(hyprland::Request::ActiveWindow)
-                    .await
-                {
-                    hyprland::Response::Raw(s) => s,
-                };
-                self.set_tooltip(TooltipContent {
-                    token: TooltipToken::WindowInfo,
-                    text: res.replace('\t', "        ").into(),
-                });
+                    .unwrap();
             }
             Message::Battery => {
                 self.set_tooltip(TooltipContent {
@@ -582,13 +575,19 @@ impl Runner {
         }
         Some(())
     }
-    pub fn dispatch_app_event(&mut self, event: AppEvent) {
+    pub async fn dispatch_app_event(&mut self, event: AppEvent) {
         let mut update_tooltip = false;
         match event {
             AppEvent::Hyprland(event) => match event {
-                hyprland::Event::Workspace { id } => self.workspace_focused = id - 1,
+                hyprland::Event::Workspace { id } => {
+                    self.workspace_focused = id - 1;
+                    self.urgent_workspaces.unset(id - 1);
+                }
                 hyprland::Event::CreateWorkspace { id } => self.workspaces.set(id - 1),
-                hyprland::Event::DestroyWorkspace { id } => self.workspaces.unset(id - 1),
+                hyprland::Event::DestroyWorkspace { id } => {
+                    self.workspaces.unset(id - 1);
+                    self.urgent_workspaces.unset(id - 1);
+                }
                 hyprland::Event::ActiveWindow { class, title } => {
                     self.window = WindowInfo {
                         icon: if class.is_empty() {
@@ -600,7 +599,24 @@ impl Runner {
                         title: truncate(title.clone(), 50, "…"),
                     }
                 }
+                hyprland::Event::Urgent { win } => self
+                    .hyprctl
+                    .send(HyprlandRequest::Query {
+                        query: hyprland::Query::Clients,
+                        token: HyprlandReqToken::Urgent { win },
+                    })
+                    .await
+                    .unwrap(),
             },
+            AppEvent::WindowInfo(x) => {
+                self.set_tooltip(TooltipContent {
+                    token: TooltipToken::WindowInfo,
+                    text: x.replace('\t', "        ").into(),
+                });
+            }
+            AppEvent::Urgent(id) => {
+                self.urgent_workspaces.set(id - 1);
+            }
             AppEvent::Battery(e) => {
                 if let Some(bat) = &mut self.battery_status {
                     match e {
