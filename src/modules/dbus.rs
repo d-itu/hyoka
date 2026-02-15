@@ -57,13 +57,29 @@ pub enum Error {
     Authentication(#[from] dbus::authentication::Error<io::Error>),
     #[error(transparent)]
     Unmarshal(#[from] dbus::unmarshal::Error),
-    #[error("{name}{}", if let Some(desc) = desc { ": {desc}" } else { "" })]
+    #[error("{}", ErrorMessage { name, desc: desc.as_ref().map(|x| &**x) })]
     ErrorMessage {
         name: Box<dbus::String>,
         desc: Option<Box<dbus::String>>,
     },
     #[error("deadline has elapsed")]
     Elapsed,
+}
+
+struct ErrorMessage<'a> {
+    name: &'a dbus::String,
+    desc: Option<&'a dbus::String>,
+}
+
+impl fmt::Display for ErrorMessage<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { name, desc } = self;
+        write!(f, "{name}")?;
+        if let Some(desc) = desc {
+            write!(f, ": {desc}")?;
+        }
+        Ok(())
+    }
 }
 
 pub type Result<T> = result::Result<T, Error>;
@@ -364,7 +380,7 @@ impl<D: Dispatcher> Connection<D> {
     async fn tooltip(&mut self, proxy: dbus::Proxy<'_>) -> Option<String> {
         let tooltip = self.get_property(proxy, "ToolTip").await.unwrap();
 
-        let tooltip = tooltip.await.unwrap();
+        let tooltip = tooltip.await.inspect_err(|e| tracing::warn!("{e}")).ok()?;
         let tooltip = unsafe {
             String::from_utf8_unchecked(
                 tooltip
