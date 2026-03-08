@@ -107,7 +107,7 @@ impl Runner {
             .align_y(Center)
     }
     fn title(&self) -> impl Into<Element<'_>> {
-        let icon = self.window.icon.clone().map(Handle::load);
+        let icon = self.window.icon.as_ref().map(Handle::load);
         let class = text(self.window.class.as_str())
             .style(|theme: &Theme| text::Style {
                 color: Some(theme.palette().primary),
@@ -130,7 +130,7 @@ impl Runner {
             .tray_items
             .iter()
             .filter_map(|(service, TrayItem { icon })| {
-                icon.clone().map(|icon| {
+                icon.as_ref().map(|icon| {
                     mouse_area(icon.load_size(22))
                         .on_enter(Message::TrayTooltip(service.clone()))
                         .on_exit(Message::CloseTooltip)
@@ -143,7 +143,7 @@ impl Runner {
     }
     fn volume(&self) -> Option<Element<'_>> {
         Some(
-            mouse_area(self.volume.icon.clone()?.load_size(17.5))
+            mouse_area(self.volume.icon.as_ref()?.load_size(17.5))
                 .on_enter(Message::Volume)
                 .on_exit(Message::CloseTooltip)
                 .into(),
@@ -151,7 +151,7 @@ impl Runner {
     }
     fn backlight(&self) -> Option<Element<'_>> {
         Some(
-            mouse_area(self.backlight.as_ref()?.icon.clone()?.load_size(17.5))
+            mouse_area(self.backlight.as_ref()?.icon.as_ref()?.load_size(17.5))
                 .on_enter(Message::Backlight)
                 .on_exit(Message::CloseTooltip)
                 .into(),
@@ -159,7 +159,7 @@ impl Runner {
     }
     fn battery(&self) -> Option<Element<'_>> {
         Some(
-            mouse_area(self.battery_status.as_ref()?.icon.clone()?.load_size(17.5))
+            mouse_area(self.battery_status.as_ref()?.icon.as_ref()?.load_size(17.5))
                 .on_enter(Message::Battery)
                 .on_exit(Message::BatteryStop)
                 .into(),

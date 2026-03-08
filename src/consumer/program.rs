@@ -241,13 +241,13 @@ enum Handle {
 }
 
 impl Handle {
-    fn load(self) -> Element<'static> {
+    fn load(&self) -> Element<'_> {
         self.load_size(24)
     }
-    fn load_size(self, size: impl Into<Length> + Copy) -> Element<'static> {
+    fn load_size(&self, size: impl Into<Length> + Copy) -> Element<'_> {
         match self {
             Handle::Pixmap(handle) => image(handle).width(size).into(),
-            Handle::Svg(handle) => svg(handle).width(size).height(size).into(),
+            Handle::Svg(handle) => svg(handle.clone()).width(size).height(size).into(),
         }
     }
 }
