@@ -175,14 +175,7 @@ pub async fn run() {
     };
 
     let mut events = sender.clone();
-    let pipewire = modules::pipewire::Daemon::new().ok();
-    let pipewire = async {
-        if let Some(daemon) = pipewire {
-            daemon
-                .listen(async |e| events.send(e.into()).await.unwrap())
-                .await
-        }
-    };
+    let pipewire = modules::pipewire::run(async |e| events.send(e.into()).await.unwrap());
 
     let mut events = sender.clone();
     let (polling_controller, mut signals) = mpsc::channel(1);

@@ -37,6 +37,7 @@ iced_program = { git = "https://github.com/uriib/iced", default-features = false
 iced_runtime = { git = "https://github.com/uriib/iced", default-features = false }
 iced_tiny_skia = { git = "https://github.com/uriib/iced", default-features = false }
 lru = { version = "0.16.3", default-features = false }
+pipewire = "0.9.2"
 png = { version = "0.18.0", default-features = false }
 roxmltree = { version = "0.21.1", default-features = false }
 rustc-hash = "2.1.1"
@@ -47,9 +48,6 @@ tiny-skia = { version = "0.11.4", default-features = false }
 tracing = "0.1.44"
 tracing-subscriber = "0.3.22"
 usvg = { version = "0.46.0", default-features = false }
-serde = { version = "1.0.228", features = ["derive"] }
-pipewire = "0.9.2"
-serde_json = "1.0.149"
 
 [build-dependencies]
 bindgen = { version = "0.72.1", features = [] }

@@ -192,6 +192,8 @@ impl BacklightStatus {
 
 #[derive(Default)]
 struct Volume {
+    display: TinyString,
+    route: TinyString,
     mute: Option<bool>,
     value: Option<f32>,
     icon: Option<Handle>,
@@ -199,13 +201,15 @@ struct Volume {
 
 impl Volume {
     fn icon(&self) -> Option<&'static str> {
-        Some(if self.mute? {
+        Some(if self.route == "Headphones" {
+            "headphones-symbolic"
+        } else if self.mute? {
             "audio-volume-muted-symbolic"
         } else {
             match self.value? {
                 ..0.33 => "audio-volume-low-symbolic",
                 0.33..=0.67 => "audio-volume-medium-symbolic",
-                0.67..1.0 => "audio-volume-high-symbolic",
+                0.67..=1.0 => "audio-volume-high-symbolic",
                 1.0.. => "audio-volume-overamplified-symbolic",
                 _ => None?,
             }
@@ -711,15 +715,18 @@ impl Runner {
             }
             AppEvent::Pipewire(e) => {
                 match e {
+                    modules::pipewire::Event::DefaultChanged { display, route } => {
+                        self.volume.display = display;
+                        self.volume.route = route;
+                    }
                     modules::pipewire::Event::Volume(x) => {
-                        self.volume.value = Some(x);
-                        self.volume.load_icon(&mut self.icon_cache);
+                        self.volume.value.replace(x);
                     }
                     modules::pipewire::Event::Mute(x) => {
-                        self.volume.mute = Some(x);
-                        self.volume.load_icon(&mut self.icon_cache);
+                        self.volume.mute.replace(x);
                     }
                 };
+                self.volume.load_icon(&mut self.icon_cache);
                 if let (
                     Some(Tooltip {
                         content:
