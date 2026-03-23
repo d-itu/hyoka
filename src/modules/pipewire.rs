@@ -100,10 +100,6 @@ pub enum Event {
     },
     Volume(f32),
     Mute(bool),
-    // Props {
-    //     volume: Option<f32>,
-    //     mute: Option<bool>,
-    // },
 }
 
 pub async fn run(mut dispatch: impl AsyncFnMut(Event)) -> Option<()> {
@@ -237,17 +233,21 @@ pub async fn run(mut dispatch: impl AsyncFnMut(Event)) -> Option<()> {
                     );
                 }
                 Message::NodeDriver {
-                    input_id: node_id,
+                    input_id,
                     driver_id,
                     device_id,
                 } => {
+                    nodes.get_mut(&input_id).map(|node| {
+                        node.object.take();
+                        node.listener.take();
+                    });
                     waiting.insert(driver_id);
                     nodes.insert(
                         driver_id,
                         Node::bind(
                             driver_id,
                             device_id,
-                            Some(node_id),
+                            Some(input_id),
                             &registry,
                             sender.clone(),
                         ),
@@ -325,8 +325,8 @@ fn get_input(nodes: &FxHashMap<u32, Node>, id: u32) -> u32 {
 }
 
 struct Node {
-    _object: node::Node,
-    _listener: NodeListener,
+    object: Option<node::Node>,
+    listener: Option<NodeListener>,
     info: NodeInfo,
 }
 
@@ -416,8 +416,8 @@ impl Node {
             })
             .register();
         Self {
-            _object: object,
-            _listener: listener,
+            object: Some(object),
+            listener: Some(listener),
             info: NodeInfo {
                 input: node,
                 name: String::default(),
